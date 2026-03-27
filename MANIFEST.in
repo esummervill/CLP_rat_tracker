@@ -1,0 +1,7 @@
+include requirements.txt
+include README.md
+include run_windows.bat
+include run_mac.command
+include main.py
+include app.py
+include tracker.py

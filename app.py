@@ -1,0 +1,537 @@
+"""
+CLP Rat Tracker - Conditioned Place Preference GUI Application
+
+A user-friendly tool for tracking which side of a bin a rat prefers,
+designed for Conditioned Place Preference (CPP) experiments.
+"""
+
+import os
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from typing import Optional
+
+import cv2
+from PIL import Image, ImageTk
+
+from tracker import (
+    RatTracker,
+    TrackingResult,
+    export_results_csv,
+    export_summary_csv,
+)
+
+WINDOW_TITLE = "CLP Rat Tracker - Conditioned Place Preference"
+CANVAS_MAX_W = 800
+CANVAS_MAX_H = 500
+SIDE_A_COLOR = "#3b82f6"
+SIDE_B_COLOR = "#ef4444"
+LINE_COLOR = "#22c55e"
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(WINDOW_TITLE)
+        self.configure(bg="#1e1e2e")
+        self.minsize(960, 700)
+
+        self.video_path = None
+        self.first_frame = None
+        self.display_frame = None
+        self.scale_factor = 1.0
+        self.original_size = (0, 0)
+
+        self.line_points = []
+        self.line_start = None
+        self.line_end = None
+        self.side_a_label_var = tk.StringVar(value="Side A")
+        self.side_b_label_var = tk.StringVar(value="Side B")
+
+        self.tracker = None
+        self.result: Optional[TrackingResult] = None
+        self.is_tracking = False
+
+        self._build_ui()
+        self._set_state("no_video")
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TFrame", background="#1e1e2e")
+        style.configure("TLabel", background="#1e1e2e", foreground="#cdd6f4",
+                         font=("Segoe UI", 11))
+        style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"),
+                         foreground="#cdd6f4", background="#1e1e2e")
+        style.configure("TButton", font=("Segoe UI", 11), padding=8)
+        style.configure("Accent.TButton", font=("Segoe UI", 11, "bold"),
+                         padding=10)
+        style.configure("TLabelframe", background="#1e1e2e",
+                         foreground="#cdd6f4")
+        style.configure("TLabelframe.Label", background="#1e1e2e",
+                         foreground="#cdd6f4", font=("Segoe UI", 11, "bold"))
+
+        # Header
+        header = ttk.Frame(self)
+        header.pack(fill="x", padx=16, pady=(12, 4))
+        ttk.Label(header, text="CLP Rat Tracker",
+                  style="Header.TLabel").pack(side="left")
+        self.status_label = ttk.Label(header, text="No video loaded")
+        self.status_label.pack(side="right")
+
+        # Main area
+        main = ttk.Frame(self)
+        main.pack(fill="both", expand=True, padx=16, pady=8)
+
+        # Left: video canvas
+        left = ttk.Frame(main)
+        left.pack(side="left", fill="both", expand=True)
+
+        self.canvas = tk.Canvas(left, bg="#313244", highlightthickness=0,
+                                cursor="crosshair")
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+
+        # Right: controls
+        right = ttk.Frame(main, width=260)
+        right.pack(side="right", fill="y", padx=(12, 0))
+        right.pack_propagate(False)
+
+        # -- Load section
+        load_frame = ttk.LabelFrame(right, text="1. Load Video", padding=10)
+        load_frame.pack(fill="x", pady=(0, 8))
+
+        self.btn_load = ttk.Button(load_frame, text="Open Video File",
+                                   command=self._load_video)
+        self.btn_load.pack(fill="x")
+
+        self.video_info_label = ttk.Label(load_frame, text="",
+                                          wraplength=220)
+        self.video_info_label.pack(fill="x", pady=(6, 0))
+
+        # -- Line section
+        line_frame = ttk.LabelFrame(right, text="2. Draw Dividing Line",
+                                    padding=10)
+        line_frame.pack(fill="x", pady=(0, 8))
+
+        self.line_instruction = ttk.Label(
+            line_frame,
+            text="Click two points on the video\nto draw the line separating\nthe two sides of the bin.",
+            wraplength=220,
+        )
+        self.line_instruction.pack(fill="x")
+
+        self.btn_reset_line = ttk.Button(line_frame, text="Reset Line",
+                                         command=self._reset_line)
+        self.btn_reset_line.pack(fill="x", pady=(6, 0))
+
+        # Side labels
+        labels_frame = ttk.Frame(line_frame)
+        labels_frame.pack(fill="x", pady=(8, 0))
+
+        a_frame = ttk.Frame(labels_frame)
+        a_frame.pack(fill="x", pady=2)
+        a_color = tk.Label(a_frame, bg=SIDE_A_COLOR, width=3)
+        a_color.pack(side="left", padx=(0, 6))
+        ttk.Label(a_frame, text="Label:").pack(side="left")
+        self.entry_a = ttk.Entry(a_frame, textvariable=self.side_a_label_var,
+                                 width=12)
+        self.entry_a.pack(side="left", padx=(4, 0))
+
+        b_frame = ttk.Frame(labels_frame)
+        b_frame.pack(fill="x", pady=2)
+        b_color = tk.Label(b_frame, bg=SIDE_B_COLOR, width=3)
+        b_color.pack(side="left", padx=(0, 6))
+        ttk.Label(b_frame, text="Label:").pack(side="left")
+        self.entry_b = ttk.Entry(b_frame, textvariable=self.side_b_label_var,
+                                 width=12)
+        self.entry_b.pack(side="left", padx=(4, 0))
+
+        # -- Tracking section
+        track_frame = ttk.LabelFrame(right, text="3. Run Tracking",
+                                     padding=10)
+        track_frame.pack(fill="x", pady=(0, 8))
+
+        sens_frame = ttk.Frame(track_frame)
+        sens_frame.pack(fill="x")
+        ttk.Label(sens_frame, text="Sensitivity:").pack(side="left")
+        self.sensitivity_var = tk.IntVar(value=50)
+        self.sensitivity_scale = ttk.Scale(
+            sens_frame, from_=10, to=90, variable=self.sensitivity_var,
+            orient="horizontal"
+        )
+        self.sensitivity_scale.pack(side="left", fill="x", expand=True,
+                                    padx=(6, 0))
+
+        min_frame = ttk.Frame(track_frame)
+        min_frame.pack(fill="x", pady=(6, 0))
+        ttk.Label(min_frame, text="Min size:").pack(side="left")
+        self.min_area_var = tk.IntVar(value=500)
+        self.min_area_entry = ttk.Entry(min_frame,
+                                        textvariable=self.min_area_var,
+                                        width=8)
+        self.min_area_entry.pack(side="left", padx=(6, 0))
+        ttk.Label(min_frame, text="px").pack(side="left", padx=(2, 0))
+
+        self.btn_track = ttk.Button(track_frame, text="Start Tracking",
+                                    style="Accent.TButton",
+                                    command=self._start_tracking)
+        self.btn_track.pack(fill="x", pady=(10, 0))
+
+        self.btn_cancel = ttk.Button(track_frame, text="Cancel",
+                                     command=self._cancel_tracking)
+        self.btn_cancel.pack(fill="x", pady=(4, 0))
+        self.btn_cancel.pack_forget()
+
+        self.progress = ttk.Progressbar(track_frame, mode="determinate")
+        self.progress.pack(fill="x", pady=(6, 0))
+
+        # -- Results section
+        res_frame = ttk.LabelFrame(right, text="4. Results", padding=10)
+        res_frame.pack(fill="x", pady=(0, 8))
+
+        self.result_text = tk.Text(
+            res_frame, height=8, bg="#313244", fg="#cdd6f4",
+            font=("Consolas", 10), relief="flat", state="disabled",
+            wrap="word"
+        )
+        self.result_text.pack(fill="x")
+
+        btn_row = ttk.Frame(res_frame)
+        btn_row.pack(fill="x", pady=(6, 0))
+        self.btn_export_detail = ttk.Button(
+            btn_row, text="Export CSV", command=self._export_detail
+        )
+        self.btn_export_detail.pack(side="left", fill="x", expand=True,
+                                    padx=(0, 3))
+        self.btn_export_summary = ttk.Button(
+            btn_row, text="Export Summary", command=self._export_summary
+        )
+        self.btn_export_summary.pack(side="left", fill="x", expand=True,
+                                     padx=(3, 0))
+
+    def _set_state(self, state):
+        """Enable/disable buttons based on current workflow step."""
+        if state == "no_video":
+            self.btn_reset_line.configure(state="disabled")
+            self.btn_track.configure(state="disabled")
+            self.btn_export_detail.configure(state="disabled")
+            self.btn_export_summary.configure(state="disabled")
+        elif state == "video_loaded":
+            self.btn_reset_line.configure(state="normal")
+            self.btn_track.configure(state="disabled")
+            self.btn_export_detail.configure(state="disabled")
+            self.btn_export_summary.configure(state="disabled")
+            self.status_label.configure(
+                text="Click two points to draw the dividing line"
+            )
+        elif state == "line_drawn":
+            self.btn_reset_line.configure(state="normal")
+            self.btn_track.configure(state="normal")
+            self.btn_export_detail.configure(state="disabled")
+            self.btn_export_summary.configure(state="disabled")
+            self.status_label.configure(text="Ready to track")
+        elif state == "tracking":
+            self.btn_load.configure(state="disabled")
+            self.btn_reset_line.configure(state="disabled")
+            self.btn_track.configure(state="disabled")
+            self.btn_cancel.pack(fill="x", pady=(4, 0))
+            self.btn_export_detail.configure(state="disabled")
+            self.btn_export_summary.configure(state="disabled")
+            self.status_label.configure(text="Tracking in progress...")
+        elif state == "done":
+            self.btn_load.configure(state="normal")
+            self.btn_reset_line.configure(state="normal")
+            self.btn_track.configure(state="normal")
+            self.btn_cancel.pack_forget()
+            self.btn_export_detail.configure(state="normal")
+            self.btn_export_summary.configure(state="normal")
+            self.status_label.configure(text="Tracking complete")
+
+    # -------------------------------------------------------- Video loading
+    def _load_video(self):
+        path = filedialog.askopenfilename(
+            title="Select Video File",
+            filetypes=[
+                ("Video files", "*.mp4 *.mts *.MTS *.avi *.mov *.mkv *.wmv"),
+                ("MP4 files", "*.mp4"),
+                ("MTS files", "*.mts *.MTS"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        info = RatTracker.get_video_info(path)
+        if info is None:
+            messagebox.showerror("Error",
+                                 "Cannot open this video file.\n\n"
+                                 "Make sure the file is a valid video.")
+            return
+
+        fps, total, w, h = info
+        self.video_path = path
+        self.original_size = (w, h)
+
+        frame = RatTracker.get_first_frame(path)
+        if frame is None:
+            messagebox.showerror("Error", "Cannot read frames from video.")
+            return
+
+        self.first_frame = frame
+        self.line_points = []
+        self.line_start = None
+        self.line_end = None
+        self.result = None
+        self._clear_results()
+
+        name = os.path.basename(path)
+        dur = total / fps if fps > 0 else 0
+        self.video_info_label.configure(
+            text=f"{name}\n{w}x{h} | {fps:.1f} fps | {dur:.1f}s"
+        )
+
+        self._display_frame(frame)
+        self._set_state("video_loaded")
+
+    def _display_frame(self, frame, annotations=None):
+        """Scale and display a frame on the canvas."""
+        h, w = frame.shape[:2]
+        canvas_w = self.canvas.winfo_width() or CANVAS_MAX_W
+        canvas_h = self.canvas.winfo_height() or CANVAS_MAX_H
+        scale = min(canvas_w / w, canvas_h / h, 1.0)
+        self.scale_factor = scale
+
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized = cv2.resize(frame, (new_w, new_h))
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+        if annotations:
+            annotations(rgb, scale)
+
+        img = Image.fromarray(rgb)
+        self.display_frame = ImageTk.PhotoImage(img)
+        self.canvas.delete("all")
+        self.canvas.create_image(canvas_w // 2, canvas_h // 2,
+                                 image=self.display_frame, anchor="center")
+        self._draw_overlay(scale, canvas_w, canvas_h, new_w, new_h)
+
+    def _draw_overlay(self, scale, canvas_w, canvas_h, img_w, img_h):
+        """Draw the dividing line and side labels on the canvas."""
+        if not self.line_start or not self.line_end:
+            return
+
+        offset_x = (canvas_w - img_w) // 2
+        offset_y = (canvas_h - img_h) // 2
+
+        x1 = int(self.line_start[0] * scale) + offset_x
+        y1 = int(self.line_start[1] * scale) + offset_y
+        x2 = int(self.line_end[0] * scale) + offset_x
+        y2 = int(self.line_end[1] * scale) + offset_y
+
+        self.canvas.create_line(x1, y1, x2, y2, fill=LINE_COLOR,
+                                width=3, dash=(6, 4))
+
+        mid_x = (x1 + x2) // 2
+        mid_y = (y1 + y2) // 2
+        dx = x2 - x1
+        dy = y2 - y1
+        length = max((dx**2 + dy**2) ** 0.5, 1)
+        nx = -dy / length * 30
+        ny = dx / length * 30
+
+        self.canvas.create_text(
+            mid_x + nx, mid_y + ny,
+            text=self.side_a_label_var.get(), fill=SIDE_A_COLOR,
+            font=("Segoe UI", 14, "bold")
+        )
+        self.canvas.create_text(
+            mid_x - nx, mid_y - ny,
+            text=self.side_b_label_var.get(), fill=SIDE_B_COLOR,
+            font=("Segoe UI", 14, "bold")
+        )
+
+    # --------------------------------------------------- Line drawing
+    def _on_canvas_click(self, event):
+        if self.first_frame is None or self.is_tracking:
+            return
+        if len(self.line_points) >= 2:
+            return
+
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        h, w = self.first_frame.shape[:2]
+        scale = self.scale_factor
+        img_w, img_h = int(w * scale), int(h * scale)
+        offset_x = (canvas_w - img_w) // 2
+        offset_y = (canvas_h - img_h) // 2
+
+        orig_x = int((event.x - offset_x) / scale)
+        orig_y = int((event.y - offset_y) / scale)
+
+        if orig_x < 0 or orig_y < 0 or orig_x >= w or orig_y >= h:
+            return
+
+        self.line_points.append((orig_x, orig_y))
+
+        if len(self.line_points) == 1:
+            self.status_label.configure(
+                text="Click second point to complete the line"
+            )
+            self._display_frame(self.first_frame)
+            sx = int(orig_x * scale) + (canvas_w - img_w) // 2
+            sy = int(orig_y * scale) + (canvas_h - img_h) // 2
+            self.canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5,
+                                    fill=LINE_COLOR, outline="white")
+
+        elif len(self.line_points) == 2:
+            self.line_start = self.line_points[0]
+            self.line_end = self.line_points[1]
+            self._display_frame(self.first_frame)
+            self._set_state("line_drawn")
+
+    def _reset_line(self):
+        self.line_points = []
+        self.line_start = None
+        self.line_end = None
+        if self.first_frame is not None:
+            self._display_frame(self.first_frame)
+        self._set_state("video_loaded")
+
+    # ----------------------------------------------------------- Tracking
+    def _start_tracking(self):
+        if not self.video_path or not self.line_start:
+            return
+
+        self.is_tracking = True
+        self._set_state("tracking")
+        self.progress["value"] = 0
+        self._clear_results()
+
+        sensitivity = self.sensitivity_var.get()
+        min_area = self.min_area_var.get()
+
+        self.tracker = RatTracker(
+            self.video_path, self.line_start, self.line_end,
+            min_contour_area=min_area, sensitivity=sensitivity
+        )
+
+        thread = threading.Thread(target=self._tracking_worker, daemon=True)
+        thread.start()
+
+    def _tracking_worker(self):
+        try:
+            result = self.tracker.run(
+                progress_callback=self._on_progress,
+                frame_callback=self._on_frame,
+            )
+            self.after(0, self._on_tracking_done, result)
+        except Exception as e:
+            self.after(0, self._on_tracking_error, str(e))
+
+    def _on_progress(self, fraction):
+        self.after(0, lambda: self.progress.configure(
+            value=int(fraction * 100)))
+
+    def _on_frame(self, frame, position, side, frame_idx):
+        def update():
+            annotated = frame.copy()
+            if self.line_start and self.line_end:
+                cv2.line(annotated,
+                         self.line_start, self.line_end,
+                         (34, 197, 94), 2, cv2.LINE_AA)
+            if position:
+                color = ((59, 130, 246) if side == "A"
+                         else (239, 68, 68) if side == "B"
+                         else (200, 200, 200))
+                cv2.circle(annotated, position, 8, color, -1)
+                cv2.circle(annotated, position, 10, (255, 255, 255), 2)
+            self._display_frame(annotated)
+        self.after(0, update)
+
+    def _on_tracking_done(self, result):
+        self.is_tracking = False
+        if result is None:
+            self._set_state("line_drawn")
+            self.status_label.configure(text="Tracking cancelled")
+            return
+
+        self.result = result
+        self._set_state("done")
+        self._show_results(result)
+
+        if self.first_frame is not None:
+            self._display_frame(self.first_frame)
+
+    def _on_tracking_error(self, error_msg):
+        self.is_tracking = False
+        self._set_state("line_drawn")
+        messagebox.showerror("Tracking Error", f"An error occurred:\n{error_msg}")
+
+    def _cancel_tracking(self):
+        if self.tracker:
+            self.tracker.cancel()
+
+    # ------------------------------------------------------------- Results
+    def _clear_results(self):
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.configure(state="disabled")
+
+    def _show_results(self, r: TrackingResult):
+        a_name = self.side_a_label_var.get()
+        b_name = self.side_b_label_var.get()
+        text = (
+            f"Duration: {r.duration_seconds:.1f} s\n"
+            f"\n"
+            f"{a_name}: {r.side_a_seconds:.1f}s ({r.side_a_percent:.1f}%)\n"
+            f"{b_name}: {r.side_b_seconds:.1f}s ({r.side_b_percent:.1f}%)\n"
+            f"\n"
+            f"Preference Index: {r.preference_index:+.3f}\n"
+            f"  (-1 = full {a_name}, +1 = full {b_name})\n"
+            f"\n"
+            f"Crossings: {r.crossings}\n"
+        )
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.insert("1.0", text)
+        self.result_text.configure(state="disabled")
+
+    def _export_detail(self):
+        if not self.result:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Detailed Results",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="tracking_detail.csv",
+        )
+        if not path:
+            return
+        export_results_csv(
+            self.result, path,
+            side_a_label=self.side_a_label_var.get(),
+            side_b_label=self.side_b_label_var.get(),
+        )
+        messagebox.showinfo("Exported", f"Detailed results saved to:\n{path}")
+
+    def _export_summary(self):
+        if not self.result:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Summary",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="tracking_summary.csv",
+        )
+        if not path:
+            return
+        video_name = os.path.basename(self.video_path) if self.video_path else ""
+        export_summary_csv(
+            self.result, path,
+            video_name=video_name,
+            side_a_label=self.side_a_label_var.get(),
+            side_b_label=self.side_b_label_var.get(),
+        )
+        messagebox.showinfo("Exported", f"Summary saved to:\n{path}")

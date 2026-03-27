@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clp-rat-tracker"
+version = "1.0.0"
+description = "Conditioned Place Preference (CPP) tracker for laboratory rat experiments"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Leo Blakeley"},
+]
+keywords = ["rat", "tracking", "CPP", "conditioned place preference", "behavior", "neuroscience"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/LeoBlakeley/CLP_rat_tracker"
+Repository = "https://github.com/LeoBlakeley/CLP_rat_tracker"
+Issues = "https://github.com/LeoBlakeley/CLP_rat_tracker/issues"
+
+[project.scripts]
+clp-rat-tracker = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "app", "tracker"]
