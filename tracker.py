@@ -5,11 +5,14 @@ side of a user-defined dividing line it occupies in each frame.
 """
 
 import csv
+import logging
 import os
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -92,23 +95,37 @@ class RatTracker:
         """Static helper to grab the first frame from a video file."""
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
+            logger.error("get_first_frame: VideoCapture failed to open: %s", video_path)
             return None
         ret, frame = cap.read()
         cap.release()
         if ret:
+            logger.debug(
+                "get_first_frame: ok shape=%s",
+                getattr(frame, "shape", None),
+            )
             return frame
+        logger.error("get_first_frame: read() returned no frame: %s", video_path)
         return None
 
     def get_video_info(video_path: str):
         """Return (fps, total_frames, width, height) for a video file."""
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
+            logger.error("get_video_info: VideoCapture failed to open: %s", video_path)
             return None
         fps = cap.get(cv2.CAP_PROP_FPS)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
+        if w <= 0 or h <= 0:
+            logger.warning(
+                "get_video_info: unusual dimensions w=%s h=%s for %s",
+                w,
+                h,
+                video_path,
+            )
         return fps, total, w, h
 
     def run(self, progress_callback=None, frame_callback=None):
@@ -121,12 +138,22 @@ class RatTracker:
         self._cancel = False
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
+            logger.error("run: cannot open video: %s", self.video_path)
             raise FileNotFoundError(f"Cannot open video: {self.video_path}")
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
+            logger.warning("run: CAP_PROP_FPS was %s; using 30.0", fps)
             fps = 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        logger.info(
+            "run: processing %s fps=%.3f frames=%s sensitivity=%s min_area=%s",
+            self.video_path,
+            fps,
+            total_frames,
+            self.sensitivity,
+            self.min_contour_area,
+        )
 
         bg_subtractor = cv2.createBackgroundSubtractorMOG2(
             history=300,
@@ -203,6 +230,14 @@ class RatTracker:
         cap.release()
         if progress_callback:
             progress_callback(1.0)
+        logger.info(
+            "run: finished frames=%s side_a=%s side_b=%s undetermined=%s crossings=%s",
+            len(result.positions),
+            result.side_a_frames,
+            result.side_b_frames,
+            result.undetermined_frames,
+            result.crossings,
+        )
         return result
 
 

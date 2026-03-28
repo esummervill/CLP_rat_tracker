@@ -6,9 +6,10 @@ Launch this file to start the application:
     python main.py
 """
 
+import logging
+import os
 import subprocess
 import sys
-import os
 
 
 REQUIRED_PACKAGES = {
@@ -63,6 +64,7 @@ def check_and_install_dependencies():
             stderr=subprocess.DEVNULL,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
+        logging.getLogger(__name__).error("pip is not available")
         print("  [ERROR] pip is not available.")
         print("  Please install pip first, then re-run this script.")
         _show_error_gui(
@@ -89,6 +91,7 @@ def check_and_install_dependencies():
             + "\n\nTry running this in a terminal:\n\n"
             + f"  {sys.executable} -m pip install " + " ".join(failed)
         )
+        logging.getLogger(__name__).error("Package install failed: %s", failed)
         print("  " + msg.replace("\n", "\n  "))
         _show_error_gui(msg)
         return False
@@ -107,6 +110,7 @@ def check_and_install_dependencies():
             + "\n".join(f"  - {p}" for p in still_missing)
             + "\n\nTry restarting the application."
         )
+        logging.getLogger(__name__).error("Imports still missing: %s", still_missing)
         _show_error_gui(msg)
         return False
 
@@ -130,12 +134,25 @@ def _show_error_gui(message):
 
 
 def main():
+    from log_setup import log_banner_after_imports, setup_logging
+
+    setup_logging()
+    log = logging.getLogger(__name__)
+
     if not check_and_install_dependencies():
+        log.error("Dependency check failed; exiting")
         sys.exit(1)
 
-    from app import App
-    app = App()
-    app.mainloop()
+    log_banner_after_imports()
+
+    try:
+        from app import App
+
+        app = App()
+        app.mainloop()
+    except Exception:
+        logging.getLogger(__name__).exception("Fatal error in application")
+        raise
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ A user-friendly tool for tracking which side of a bin a rat prefers,
 designed for Conditioned Place Preference (CPP) experiments.
 """
 
+import logging
 import os
 import threading
 import tkinter as tk
@@ -21,6 +22,8 @@ from tracker import (
     export_summary_csv,
 )
 
+logger = logging.getLogger(__name__)
+
 WINDOW_TITLE = "CLP Rat Tracker - Conditioned Place Preference"
 CANVAS_MAX_W = 800
 CANVAS_MAX_H = 500
@@ -35,6 +38,7 @@ class App(tk.Tk):
         self.title(WINDOW_TITLE)
         self.configure(bg="#1e1e2e")
         self.minsize(960, 700)
+        logger.info("Main window created (tkinter)")
 
         self.video_path = None
         self.first_frame = None
@@ -54,6 +58,15 @@ class App(tk.Tk):
 
         self._build_ui()
         self._set_state("no_video")
+        self.bind("<Map>", self._on_window_mapped)
+
+    def _on_window_mapped(self, _event=None):
+        """Redraw video after the window is visible (avoids 1x1 canvas / black area)."""
+        if getattr(self, "_did_map_refresh", False):
+            return
+        self._did_map_refresh = True
+        logger.debug("Window mapped; scheduling canvas refresh if video loaded")
+        self.after_idle(self._refresh_video_canvas)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -263,19 +276,26 @@ class App(tk.Tk):
         if not path:
             return
 
+        logger.info("Open video requested: %s", path)
         info = RatTracker.get_video_info(path)
         if info is None:
+            logger.error("get_video_info failed for: %s", path)
             messagebox.showerror("Error",
                                  "Cannot open this video file.\n\n"
                                  "Make sure the file is a valid video.")
             return
 
         fps, total, w, h = info
+        logger.info(
+            "Video metadata: %sx%s fps=%s frames=%s",
+            w, h, fps, total,
+        )
         self.video_path = path
         self.original_size = (w, h)
 
         frame = RatTracker.get_first_frame(path)
         if frame is None:
+            logger.error("get_first_frame returned None for: %s", path)
             messagebox.showerror("Error", "Cannot read frames from video.")
             return
 
@@ -293,13 +313,25 @@ class App(tk.Tk):
         )
 
         self._display_frame(frame)
+        self.after_idle(self._refresh_video_canvas)
         self._set_state("video_loaded")
+
+    def _refresh_video_canvas(self):
+        """Redraw after layout so canvas has real dimensions (fixes blank/black preview)."""
+        if self.first_frame is None:
+            return
+        self.update_idletasks()
+        self._display_frame(self.first_frame)
 
     def _display_frame(self, frame, annotations=None):
         """Scale and display a frame on the canvas."""
         h, w = frame.shape[:2]
         canvas_w = self.canvas.winfo_width() or CANVAS_MAX_W
         canvas_h = self.canvas.winfo_height() or CANVAS_MAX_H
+        if canvas_w < 32:
+            canvas_w = CANVAS_MAX_W
+        if canvas_h < 32:
+            canvas_h = CANVAS_MAX_H
         scale = min(canvas_w / w, canvas_h / h, 1.0)
         self.scale_factor = scale
 
@@ -310,12 +342,26 @@ class App(tk.Tk):
         if annotations:
             annotations(rgb, scale)
 
-        img = Image.fromarray(rgb)
-        self.display_frame = ImageTk.PhotoImage(img)
-        self.canvas.delete("all")
-        self.canvas.create_image(canvas_w // 2, canvas_h // 2,
-                                 image=self.display_frame, anchor="center")
-        self._draw_overlay(scale, canvas_w, canvas_h, new_w, new_h)
+        try:
+            img = Image.fromarray(rgb)
+            self.display_frame = ImageTk.PhotoImage(img)
+            self.canvas.delete("all")
+            self.canvas.create_image(
+                canvas_w // 2, canvas_h // 2,
+                image=self.display_frame, anchor="center",
+            )
+            self._draw_overlay(scale, canvas_w, canvas_h, new_w, new_h)
+        except tk.TclError:
+            logger.exception("Tk canvas/image error (display frame)")
+            raise
+        except Exception:
+            logger.exception("Failed to render frame on canvas")
+            raise
+
+        logger.debug(
+            "Frame displayed: video=%sx%s canvas=%sx%s scale=%.4f",
+            w, h, canvas_w, canvas_h, scale,
+        )
 
     def _draw_overlay(self, scale, canvas_w, canvas_h, img_w, img_h):
         """Draw the dividing line and side labels on the canvas."""
@@ -404,6 +450,14 @@ class App(tk.Tk):
         if not self.video_path or not self.line_start:
             return
 
+        logger.info(
+            "Start tracking: video=%s line=%s->%s sensitivity=%s min_area=%s",
+            self.video_path,
+            self.line_start,
+            self.line_end,
+            self.sensitivity_var.get(),
+            self.min_area_var.get(),
+        )
         self.is_tracking = True
         self._set_state("tracking")
         self.progress["value"] = 0
@@ -428,6 +482,7 @@ class App(tk.Tk):
             )
             self.after(0, self._on_tracking_done, result)
         except Exception as e:
+            logger.exception("Tracking worker failed")
             self.after(0, self._on_tracking_error, str(e))
 
     def _on_progress(self, fraction):
@@ -467,6 +522,7 @@ class App(tk.Tk):
     def _on_tracking_error(self, error_msg):
         self.is_tracking = False
         self._set_state("line_drawn")
+        logger.error("Tracking error (UI): %s", error_msg)
         messagebox.showerror("Tracking Error", f"An error occurred:\n{error_msg}")
 
     def _cancel_tracking(self):

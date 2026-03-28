@@ -10,6 +10,7 @@ build/
 .venv
 env/
 venv/
+logs/
 output/
 results/
 *.mp4
