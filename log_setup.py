@@ -6,6 +6,7 @@ Logs live under ./logs/ next to the package (same folder as this file).
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sys
@@ -90,6 +91,10 @@ def setup_logging(
     root.addHandler(main_handler)
     root.addHandler(session_handler)
     root.addHandler(console)
+
+    atexit.register(logging.shutdown)
+
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
     log = logging.getLogger("log_setup")
 

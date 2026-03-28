@@ -30,7 +30,6 @@ CANVAS_MAX_W = 800
 CANVAS_MAX_H = 500
 SIDE_A_COLOR = "#3b82f6"
 SIDE_B_COLOR = "#ef4444"
-LINE_COLOR = "#22c55e"
 
 
 class App(tk.Tk):
@@ -60,14 +59,21 @@ class App(tk.Tk):
         self._build_ui()
         self._set_state("no_video")
         self.bind("<Map>", self._on_window_mapped)
+        self.after(400, self._log_ui_ready)
+
+    def _log_ui_ready(self) -> None:
+        logger.info(
+            "UI ready — click 'Open Video File' to load a recording. "
+            "Preview uses the label+PhotoImage path (macOS-friendly)."
+        )
 
     def _on_window_mapped(self, _event=None):
-        """Redraw video after the window is visible (avoids 1x1 canvas / black area)."""
+        """Redraw video after the window is visible."""
         if getattr(self, "_did_map_refresh", False):
             return
         self._did_map_refresh = True
-        logger.debug("Window mapped; scheduling canvas refresh if video loaded")
-        self.after_idle(self._refresh_video_canvas)
+        logger.debug("Window mapped; scheduling preview refresh if video loaded")
+        self.after_idle(self._refresh_preview)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -98,22 +104,22 @@ class App(tk.Tk):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True, padx=16, pady=8)
 
-        # Left: video preview — canvas intrinsic size = scaled frame (not fill=both),
-        # so we never draw into a 1x1 widget or mismatch center vs bitmap (blank on macOS).
+        # Left: video preview — tk.Label + PhotoImage is reliable on macOS; Canvas+image often blanks.
         left = ttk.Frame(main)
         left.pack(side="left", fill="both", expand=True)
 
         self._video_holder = tk.Frame(left, bg="#313244")
         self._video_holder.pack(expand=True, fill="both")
 
-        self.canvas = tk.Canvas(
+        self.preview = tk.Label(
             self._video_holder,
             bg="#313244",
-            highlightthickness=0,
             cursor="crosshair",
+            borderwidth=0,
+            highlightthickness=0,
         )
-        self.canvas.pack(expand=True)
-        self.canvas.bind("<Button-1>", self._on_canvas_click)
+        self.preview.pack(expand=True)
+        self.preview.bind("<Button-1>", self._on_preview_click)
 
         # Right: controls
         right = ttk.Frame(main, width=260)
@@ -322,10 +328,10 @@ class App(tk.Tk):
         )
 
         self._display_frame(frame)
-        self.after_idle(self._refresh_video_canvas)
+        self.after_idle(self._refresh_preview)
         self._set_state("video_loaded")
 
-    def _refresh_video_canvas(self):
+    def _refresh_preview(self):
         """Redraw after layout (e.g. first window map)."""
         if self.first_frame is None:
             return
@@ -347,12 +353,60 @@ class App(tk.Tk):
             bgr = np.clip(bgr, 0, 255).astype(np.uint8)
         return bgr
 
-    def _display_frame(self, frame, annotations=None):
-        """Scale frame to fit CANVAS_MAX_* and size the canvas to match the bitmap.
+    def _paint_preview_annotations(self, bgr: np.ndarray, scale: float) -> None:
+        """Line, first-click marker, and side labels drawn in BGR on the resized preview."""
+        if self.line_start and self.line_end:
+            p1 = (
+                int(round(self.line_start[0] * scale)),
+                int(round(self.line_start[1] * scale)),
+            )
+            p2 = (
+                int(round(self.line_end[0] * scale)),
+                int(round(self.line_end[1] * scale)),
+            )
+            cv2.line(bgr, p1, p2, (34, 197, 94), 2, cv2.LINE_AA)
+            mid_x = (p1[0] + p2[0]) // 2
+            mid_y = (p1[1] + p2[1]) // 2
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            length = max((dx * dx + dy * dy) ** 0.5, 1.0)
+            nx = -dy / length * 36
+            ny = dx / length * 36
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            fs = 0.55
+            t = self.side_a_label_var.get()
+            (tw, th), _ = cv2.getTextSize(t, font, fs, 1)
+            cv2.putText(
+                bgr,
+                t,
+                (int(mid_x + nx - tw // 2), int(mid_y + ny + th // 2)),
+                font,
+                fs,
+                (246, 130, 59),
+                1,
+                cv2.LINE_AA,
+            )
+            t = self.side_b_label_var.get()
+            (tw, th), _ = cv2.getTextSize(t, font, fs, 1)
+            cv2.putText(
+                bgr,
+                t,
+                (int(mid_x - nx - tw // 2), int(mid_y - ny + th // 2)),
+                font,
+                fs,
+                (68, 68, 239),
+                1,
+                cv2.LINE_AA,
+            )
+        elif len(self.line_points) == 1:
+            p = self.line_points[0]
+            cx = int(round(p[0] * scale))
+            cy = int(round(p[1] * scale))
+            cv2.circle(bgr, (cx, cy), 6, (34, 197, 94), -1, cv2.LINE_AA)
+            cv2.circle(bgr, (cx, cy), 8, (255, 255, 255), 1, cv2.LINE_AA)
 
-        Avoids relying on winfo_* while the widget is still 1x1 (common on macOS),
-        which previously centered the image in 'virtual' space and showed a blank area.
-        """
+    def _display_frame(self, frame):
+        """Resize preview and show via tk.Label + PhotoImage (reliable on macOS)."""
         self.update_idletasks()
 
         try:
@@ -372,97 +426,46 @@ class App(tk.Tk):
         new_h = max(1, int(round(h * scale)))
 
         resized = cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if not self.is_tracking:
+            self._paint_preview_annotations(resized, scale)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-        if annotations:
-            annotations(rgb, scale)
-
         try:
-            self.canvas.configure(width=new_w, height=new_h)
-            self.update_idletasks()
             pil = Image.fromarray(rgb, mode="RGB")
             self.display_frame = ImageTk.PhotoImage(pil, master=self)
-            self.canvas.delete("all")
-            self.canvas.create_image(
-                new_w // 2,
-                new_h // 2,
-                image=self.display_frame,
-                anchor="center",
-            )
-            self._draw_overlay(scale, new_w, new_h, new_w, new_h)
+            self.preview.configure(image=self.display_frame)
+            self.preview.image = self.display_frame
         except tk.TclError:
-            logger.exception("Tk canvas/image error (display frame)")
+            logger.exception("Tk Label/PhotoImage error (display frame)")
             raise
         except Exception:
-            logger.exception("Failed to render frame on canvas")
+            logger.exception("Failed to show frame on preview label")
             raise
 
-        tw = int(self.canvas.winfo_width())
-        th = int(self.canvas.winfo_height())
+        pw = int(self.preview.winfo_width())
+        ph = int(self.preview.winfo_height())
         logger.info(
-            "Frame displayed: video=%sx%s scaled=%sx%s tk_canvas=%sx%s scale=%.4f",
+            "Frame displayed: video=%sx%s scaled=%sx%s label_winfo=%sx%s scale=%.4f",
             w,
             h,
             new_w,
             new_h,
-            tw,
-            th,
+            pw,
+            ph,
             scale,
         )
 
-    def _draw_overlay(self, scale, canvas_w, canvas_h, img_w, img_h):
-        """Draw the dividing line and side labels on the canvas."""
-        if not self.line_start or not self.line_end:
-            return
-
-        offset_x = (canvas_w - img_w) // 2
-        offset_y = (canvas_h - img_h) // 2
-
-        x1 = int(self.line_start[0] * scale) + offset_x
-        y1 = int(self.line_start[1] * scale) + offset_y
-        x2 = int(self.line_end[0] * scale) + offset_x
-        y2 = int(self.line_end[1] * scale) + offset_y
-
-        self.canvas.create_line(x1, y1, x2, y2, fill=LINE_COLOR,
-                                width=3, dash=(6, 4))
-
-        mid_x = (x1 + x2) // 2
-        mid_y = (y1 + y2) // 2
-        dx = x2 - x1
-        dy = y2 - y1
-        length = max((dx**2 + dy**2) ** 0.5, 1)
-        nx = -dy / length * 30
-        ny = dx / length * 30
-
-        self.canvas.create_text(
-            mid_x + nx, mid_y + ny,
-            text=self.side_a_label_var.get(), fill=SIDE_A_COLOR,
-            font=("Segoe UI", 14, "bold")
-        )
-        self.canvas.create_text(
-            mid_x - nx, mid_y - ny,
-            text=self.side_b_label_var.get(), fill=SIDE_B_COLOR,
-            font=("Segoe UI", 14, "bold")
-        )
-
     # --------------------------------------------------- Line drawing
-    def _on_canvas_click(self, event):
+    def _on_preview_click(self, event):
         if self.first_frame is None or self.is_tracking:
             return
         if len(self.line_points) >= 2:
             return
 
-        canvas_w = int(self.canvas.winfo_width())
-        canvas_h = int(self.canvas.winfo_height())
         h, w = self.first_frame.shape[:2]
         scale = self.scale_factor
-        img_w = max(1, int(round(w * scale)))
-        img_h = max(1, int(round(h * scale)))
-        offset_x = (canvas_w - img_w) // 2
-        offset_y = (canvas_h - img_h) // 2
-
-        orig_x = int(round((event.x - offset_x) / scale))
-        orig_y = int(round((event.y - offset_y) / scale))
+        orig_x = int(round(event.x / scale))
+        orig_y = int(round(event.y / scale))
 
         if orig_x < 0 or orig_y < 0 or orig_x >= w or orig_y >= h:
             return
@@ -474,10 +477,6 @@ class App(tk.Tk):
                 text="Click second point to complete the line"
             )
             self._display_frame(self.first_frame)
-            sx = int(orig_x * scale) + (canvas_w - img_w) // 2
-            sy = int(orig_y * scale) + (canvas_h - img_h) // 2
-            self.canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5,
-                                    fill=LINE_COLOR, outline="white")
 
         elif len(self.line_points) == 2:
             self.line_start = self.line_points[0]
