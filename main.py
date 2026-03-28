@@ -8,6 +8,7 @@ Launch this file to start the application:
 
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 
@@ -138,6 +139,10 @@ def main():
 
     setup_logging()
     log = logging.getLogger(__name__)
+    log.info(
+        "Application folder (this copy of the code): %s",
+        pathlib.Path(__file__).resolve().parent,
+    )
 
     if not check_and_install_dependencies():
         log.error("Dependency check failed; exiting")

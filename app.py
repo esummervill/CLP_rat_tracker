@@ -28,10 +28,6 @@ logger = logging.getLogger(__name__)
 WINDOW_TITLE = "CLP Rat Tracker - Conditioned Place Preference"
 CANVAS_MAX_W = 800
 CANVAS_MAX_H = 500
-# Tk often reports 1x1 until the window is laid out; drawing must use real size.
-MIN_CANVAS_READY = 16
-_CANVAS_DEFER_MS = 30
-_MAX_CANVAS_DEFER = 80
 SIDE_A_COLOR = "#3b82f6"
 SIDE_B_COLOR = "#ef4444"
 LINE_COLOR = "#22c55e"
@@ -102,13 +98,21 @@ class App(tk.Tk):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True, padx=16, pady=8)
 
-        # Left: video canvas
+        # Left: video preview — canvas intrinsic size = scaled frame (not fill=both),
+        # so we never draw into a 1x1 widget or mismatch center vs bitmap (blank on macOS).
         left = ttk.Frame(main)
         left.pack(side="left", fill="both", expand=True)
 
-        self.canvas = tk.Canvas(left, bg="#313244", highlightthickness=0,
-                                cursor="crosshair")
-        self.canvas.pack(fill="both", expand=True)
+        self._video_holder = tk.Frame(left, bg="#313244")
+        self._video_holder.pack(expand=True, fill="both")
+
+        self.canvas = tk.Canvas(
+            self._video_holder,
+            bg="#313244",
+            highlightthickness=0,
+            cursor="crosshair",
+        )
+        self.canvas.pack(expand=True)
         self.canvas.bind("<Button-1>", self._on_canvas_click)
 
         # Right: controls
@@ -322,11 +326,11 @@ class App(tk.Tk):
         self._set_state("video_loaded")
 
     def _refresh_video_canvas(self):
-        """Redraw after layout so canvas has real dimensions (fixes blank/black preview)."""
+        """Redraw after layout (e.g. first window map)."""
         if self.first_frame is None:
             return
         self.update_idletasks()
-        self._display_frame(self.first_frame, _defer=0)
+        self._display_frame(self.first_frame)
 
     @staticmethod
     def _to_bgr_uint8(frame: np.ndarray) -> np.ndarray:
@@ -343,57 +347,13 @@ class App(tk.Tk):
             bgr = np.clip(bgr, 0, 255).astype(np.uint8)
         return bgr
 
-    def _display_frame(self, frame, annotations=None, _defer: int = 0):
-        """Scale and display a frame using the *actual* canvas pixel size.
+    def _display_frame(self, frame, annotations=None):
+        """Scale frame to fit CANVAS_MAX_* and size the canvas to match the bitmap.
 
-        If we scale using placeholder dimensions but draw at those coordinates
-        while the real canvas is still 1x1, the image ends up off-screen (blank).
+        Avoids relying on winfo_* while the widget is still 1x1 (common on macOS),
+        which previously centered the image in 'virtual' space and showed a blank area.
         """
         self.update_idletasks()
-        aw = int(self.canvas.winfo_width())
-        ah = int(self.canvas.winfo_height())
-
-        if _defer == 0 and (aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY):
-            self.update()
-
-        aw = int(self.canvas.winfo_width())
-        ah = int(self.canvas.winfo_height())
-
-        if aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY:
-            if _defer == 45:
-                logger.warning(
-                    "Canvas still %sx%s after %s waits; setting explicit preview size",
-                    aw,
-                    ah,
-                    _defer,
-                )
-                self.canvas.configure(width=CANVAS_MAX_W, height=CANVAS_MAX_H)
-                self.update_idletasks()
-                aw = int(self.canvas.winfo_width())
-                ah = int(self.canvas.winfo_height())
-
-        if aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY:
-            if _defer < _MAX_CANVAS_DEFER:
-                if _defer % 25 == 0:
-                    logger.info(
-                        "Canvas not ready (%sx%s), deferring frame draw (%s/%s)",
-                        aw,
-                        ah,
-                        _defer,
-                        _MAX_CANVAS_DEFER,
-                    )
-                self.after(
-                    _CANVAS_DEFER_MS,
-                    lambda f=frame, a=annotations, d=_defer + 1: self._display_frame(
-                        f, a, d
-                    ),
-                )
-                return
-            logger.error(
-                "Canvas layout failed; size still %sx%s — preview may stay blank",
-                aw,
-                ah,
-            )
 
         try:
             bgr = self._to_bgr_uint8(frame)
@@ -406,13 +366,11 @@ class App(tk.Tk):
             logger.error("Invalid frame dimensions: %s", bgr.shape)
             return
 
-        canvas_w = max(aw, 1)
-        canvas_h = max(ah, 1)
-        scale = min(canvas_w / w, canvas_h / h, 1.0)
+        scale = min(CANVAS_MAX_W / w, CANVAS_MAX_H / h, 1.0)
         self.scale_factor = scale
-
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
+
         resized = cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
@@ -420,18 +378,18 @@ class App(tk.Tk):
             annotations(rgb, scale)
 
         try:
+            self.canvas.configure(width=new_w, height=new_h)
+            self.update_idletasks()
             pil = Image.fromarray(rgb, mode="RGB")
             self.display_frame = ImageTk.PhotoImage(pil, master=self)
             self.canvas.delete("all")
-            cx = canvas_w // 2
-            cy = canvas_h // 2
             self.canvas.create_image(
-                cx,
-                cy,
+                new_w // 2,
+                new_h // 2,
                 image=self.display_frame,
                 anchor="center",
             )
-            self._draw_overlay(scale, canvas_w, canvas_h, new_w, new_h)
+            self._draw_overlay(scale, new_w, new_h, new_w, new_h)
         except tk.TclError:
             logger.exception("Tk canvas/image error (display frame)")
             raise
@@ -439,14 +397,16 @@ class App(tk.Tk):
             logger.exception("Failed to render frame on canvas")
             raise
 
+        tw = int(self.canvas.winfo_width())
+        th = int(self.canvas.winfo_height())
         logger.info(
-            "Frame displayed: video=%sx%s canvas=%sx%s scaled=%sx%s scale=%.4f",
+            "Frame displayed: video=%sx%s scaled=%sx%s tk_canvas=%sx%s scale=%.4f",
             w,
             h,
-            canvas_w,
-            canvas_h,
             new_w,
             new_h,
+            tw,
+            th,
             scale,
         )
 
@@ -492,16 +452,17 @@ class App(tk.Tk):
         if len(self.line_points) >= 2:
             return
 
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
+        canvas_w = int(self.canvas.winfo_width())
+        canvas_h = int(self.canvas.winfo_height())
         h, w = self.first_frame.shape[:2]
         scale = self.scale_factor
-        img_w, img_h = int(w * scale), int(h * scale)
+        img_w = max(1, int(round(w * scale)))
+        img_h = max(1, int(round(h * scale)))
         offset_x = (canvas_w - img_w) // 2
         offset_y = (canvas_h - img_h) // 2
 
-        orig_x = int((event.x - offset_x) / scale)
-        orig_y = int((event.y - offset_y) / scale)
+        orig_x = int(round((event.x - offset_x) / scale))
+        orig_y = int(round((event.y - offset_y) / scale))
 
         if orig_x < 0 or orig_y < 0 or orig_x >= w or orig_y >= h:
             return
