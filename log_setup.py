@@ -52,7 +52,7 @@ def get_log_dir() -> str:
 def setup_logging(
     *,
     capture_stderr: bool = True,
-    console_level: int = logging.INFO,
+    console_level: int = logging.WARNING,
 ) -> Tuple[str, str]:
     """
     Configure root logging. Returns (main_log_path, session_log_path).

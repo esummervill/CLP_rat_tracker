@@ -7,10 +7,11 @@ designed for Conditioned Place Preference (CPP) experiments.
 
 import logging
 import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -36,9 +37,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(WINDOW_TITLE)
-        self.configure(bg="#1e1e2e")
         self.minsize(960, 700)
-        logger.info("Main window created (tkinter)")
+        self.geometry("1140x800+80+60")
 
         self.video_path = None
         self.first_frame = None
@@ -59,13 +59,8 @@ class App(tk.Tk):
         self._build_ui()
         self._set_state("no_video")
         self.bind("<Map>", self._on_window_mapped)
-        self.after(400, self._log_ui_ready)
-
-    def _log_ui_ready(self) -> None:
-        logger.info(
-            "UI ready — click 'Open Video File' to load a recording. "
-            "Preview uses the label+PhotoImage path (macOS-friendly)."
-        )
+        self.after(50, self._present_main_window)
+        logger.info("Main window created (tkinter)")
 
     def _on_window_mapped(self, _event=None):
         """Redraw video after the window is visible."""
@@ -75,34 +70,131 @@ class App(tk.Tk):
         logger.debug("Window mapped; scheduling preview refresh if video loaded")
         self.after_idle(self._refresh_preview)
 
+    def _present_main_window(self) -> None:
+        """Bring the window forward; macOS often opens behind Terminal."""
+        self.update_idletasks()
+        try:
+            self.deiconify()
+        except tk.TclError:
+            pass
+        self.lift()
+        try:
+            self.attributes("-topmost", True)
+            self.after(150, lambda: self.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+        try:
+            self.focus_force()
+        except tk.TclError:
+            try:
+                self.focus_set()
+            except tk.TclError:
+                pass
+
+    def _configure_platform_style(self, style: ttk.Style) -> Tuple[str, str]:
+        """ttk colors/fonts. On macOS, dark 'clam' + Segoe UI often paints invisible controls."""
+        if sys.platform == "darwin":
+            try:
+                style.theme_use("aqua")
+            except tk.TclError:
+                style.theme_use("clam")
+            bg = "#ececec"
+            fg = "#1a1a1a"
+            self.configure(bg=bg)
+            font_ui = ("Helvetica Neue", 12)
+            style.configure("TFrame", background=bg)
+            style.configure("TLabel", background=bg, foreground=fg, font=font_ui)
+            style.configure(
+                "Header.TLabel",
+                font=("Helvetica Neue", 18, "bold"),
+                foreground="#0f172a",
+                background=bg,
+            )
+            style.configure("TButton", font=font_ui, padding=8)
+            style.configure(
+                "Accent.TButton",
+                font=("Helvetica Neue", 13, "bold"),
+                padding=10,
+            )
+            style.configure("TLabelframe", background=bg, foreground=fg)
+            style.configure(
+                "TLabelframe.Label",
+                background=bg,
+                foreground=fg,
+                font=("Helvetica Neue", 12, "bold"),
+            )
+            return "#ffffff", "#111827"
+
+        style.theme_use("clam")
+        self.configure(bg="#1e1e2e")
+        font_ui = ("Segoe UI", 11)
+        style.configure("TFrame", background="#1e1e2e")
+        style.configure(
+            "TLabel",
+            background="#1e1e2e",
+            foreground="#cdd6f4",
+            font=font_ui,
+        )
+        style.configure(
+            "Header.TLabel",
+            font=("Segoe UI", 16, "bold"),
+            foreground="#cdd6f4",
+            background="#1e1e2e",
+        )
+        style.configure("TButton", font=font_ui, padding=8)
+        style.configure(
+            "Accent.TButton",
+            font=("Segoe UI", 11, "bold"),
+            padding=10,
+        )
+        style.configure("TLabelframe", background="#1e1e2e", foreground="#cdd6f4")
+        style.configure(
+            "TLabelframe.Label",
+            background="#1e1e2e",
+            foreground="#cdd6f4",
+            font=("Segoe UI", 11, "bold"),
+        )
+        return "#313244", "#cdd6f4"
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TFrame", background="#1e1e2e")
-        style.configure("TLabel", background="#1e1e2e", foreground="#cdd6f4",
-                         font=("Segoe UI", 11))
-        style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"),
-                         foreground="#cdd6f4", background="#1e1e2e")
-        style.configure("TButton", font=("Segoe UI", 11), padding=8)
-        style.configure("Accent.TButton", font=("Segoe UI", 11, "bold"),
-                         padding=10)
-        style.configure("TLabelframe", background="#1e1e2e",
-                         foreground="#cdd6f4")
-        style.configure("TLabelframe.Label", background="#1e1e2e",
-                         foreground="#cdd6f4", font=("Segoe UI", 11, "bold"))
+        rt_bg, rt_fg = self._configure_platform_style(style)
+        rt_font = ("Menlo", 11) if sys.platform == "darwin" else ("Consolas", 10)
+        hint_font = (
+            ("Helvetica Neue", 12) if sys.platform == "darwin" else ("Segoe UI", 11)
+        )
 
         # Header
         header = ttk.Frame(self)
-        header.pack(fill="x", padx=16, pady=(12, 4))
+        header.pack(fill=tk.X, padx=16, pady=(12, 4))
         ttk.Label(header, text="CLP Rat Tracker",
                   style="Header.TLabel").pack(side="left")
         self.status_label = ttk.Label(header, text="No video loaded")
         self.status_label.pack(side="right")
 
-        # Main area
+        # On-window instructions (not only in Terminal / log files)
+        self.hint_bar = tk.Label(
+            self,
+            text=(
+                "Instructions: (1) Click “Open Video File” on the right. "
+                "(2) Click two points on the gray preview to draw the dividing line. "
+                "Status messages also go to logs/ in this app folder."
+            ),
+            bg="#fef3c7",
+            fg="#713f12",
+            font=hint_font,
+            anchor="w",
+            padx=14,
+            pady=10,
+            wraplength=1000,
+            justify=tk.LEFT,
+        )
+        self.hint_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Main area (between header and hint bar)
         main = ttk.Frame(self)
-        main.pack(fill="both", expand=True, padx=16, pady=8)
+        main.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
 
         # Left: video preview — tk.Label + PhotoImage is reliable on macOS; Canvas+image often blanks.
         left = ttk.Frame(main)
@@ -220,9 +312,14 @@ class App(tk.Tk):
         res_frame.pack(fill="x", pady=(0, 8))
 
         self.result_text = tk.Text(
-            res_frame, height=8, bg="#313244", fg="#cdd6f4",
-            font=("Consolas", 10), relief="flat", state="disabled",
-            wrap="word"
+            res_frame,
+            height=8,
+            bg=rt_bg,
+            fg=rt_fg,
+            font=rt_font,
+            relief="flat",
+            state="disabled",
+            wrap="word",
         )
         self.result_text.pack(fill="x")
 
@@ -329,6 +426,9 @@ class App(tk.Tk):
 
         self._display_frame(frame)
         self.after_idle(self._refresh_preview)
+        self.hint_bar.configure(
+            text="Video loaded. Click two points on the gray preview to draw the dividing line."
+        )
         self._set_state("video_loaded")
 
     def _refresh_preview(self):

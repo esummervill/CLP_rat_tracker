@@ -137,6 +137,7 @@ def _show_error_gui(message):
 def main():
     from log_setup import log_banner_after_imports, setup_logging
 
+    # INFO/DEBUG go to logs/ only; terminal shows WARNING+ so the GUI isn’t “replaced” by console text.
     setup_logging()
     log = logging.getLogger(__name__)
     log.info(
