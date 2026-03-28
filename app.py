@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 
 from tracker import (
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 WINDOW_TITLE = "CLP Rat Tracker - Conditioned Place Preference"
 CANVAS_MAX_W = 800
 CANVAS_MAX_H = 500
+# Tk often reports 1x1 until the window is laid out; drawing must use real size.
+MIN_CANVAS_READY = 16
+_CANVAS_DEFER_MS = 30
+_MAX_CANVAS_DEFER = 80
 SIDE_A_COLOR = "#3b82f6"
 SIDE_B_COLOR = "#ef4444"
 LINE_COLOR = "#22c55e"
@@ -321,34 +326,110 @@ class App(tk.Tk):
         if self.first_frame is None:
             return
         self.update_idletasks()
-        self._display_frame(self.first_frame)
+        self._display_frame(self.first_frame, _defer=0)
 
-    def _display_frame(self, frame, annotations=None):
-        """Scale and display a frame on the canvas."""
-        h, w = frame.shape[:2]
-        canvas_w = self.canvas.winfo_width() or CANVAS_MAX_W
-        canvas_h = self.canvas.winfo_height() or CANVAS_MAX_H
-        if canvas_w < 32:
-            canvas_w = CANVAS_MAX_W
-        if canvas_h < 32:
-            canvas_h = CANVAS_MAX_H
+    @staticmethod
+    def _to_bgr_uint8(frame: np.ndarray) -> np.ndarray:
+        """Normalize OpenCV frames to 3-channel uint8 BGR for resize/display."""
+        if frame.ndim == 2:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        elif frame.shape[2] == 4:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        elif frame.shape[2] == 3:
+            bgr = frame
+        else:
+            raise ValueError(f"Unsupported frame shape {frame.shape}")
+        if bgr.dtype != np.uint8:
+            bgr = np.clip(bgr, 0, 255).astype(np.uint8)
+        return bgr
+
+    def _display_frame(self, frame, annotations=None, _defer: int = 0):
+        """Scale and display a frame using the *actual* canvas pixel size.
+
+        If we scale using placeholder dimensions but draw at those coordinates
+        while the real canvas is still 1x1, the image ends up off-screen (blank).
+        """
+        self.update_idletasks()
+        aw = int(self.canvas.winfo_width())
+        ah = int(self.canvas.winfo_height())
+
+        if _defer == 0 and (aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY):
+            self.update()
+
+        aw = int(self.canvas.winfo_width())
+        ah = int(self.canvas.winfo_height())
+
+        if aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY:
+            if _defer == 45:
+                logger.warning(
+                    "Canvas still %sx%s after %s waits; setting explicit preview size",
+                    aw,
+                    ah,
+                    _defer,
+                )
+                self.canvas.configure(width=CANVAS_MAX_W, height=CANVAS_MAX_H)
+                self.update_idletasks()
+                aw = int(self.canvas.winfo_width())
+                ah = int(self.canvas.winfo_height())
+
+        if aw < MIN_CANVAS_READY or ah < MIN_CANVAS_READY:
+            if _defer < _MAX_CANVAS_DEFER:
+                if _defer % 25 == 0:
+                    logger.info(
+                        "Canvas not ready (%sx%s), deferring frame draw (%s/%s)",
+                        aw,
+                        ah,
+                        _defer,
+                        _MAX_CANVAS_DEFER,
+                    )
+                self.after(
+                    _CANVAS_DEFER_MS,
+                    lambda f=frame, a=annotations, d=_defer + 1: self._display_frame(
+                        f, a, d
+                    ),
+                )
+                return
+            logger.error(
+                "Canvas layout failed; size still %sx%s — preview may stay blank",
+                aw,
+                ah,
+            )
+
+        try:
+            bgr = self._to_bgr_uint8(frame)
+        except Exception:
+            logger.exception("Bad video frame shape %s", getattr(frame, "shape", None))
+            raise
+
+        h, w = bgr.shape[:2]
+        if w <= 0 or h <= 0:
+            logger.error("Invalid frame dimensions: %s", bgr.shape)
+            return
+
+        canvas_w = max(aw, 1)
+        canvas_h = max(ah, 1)
         scale = min(canvas_w / w, canvas_h / h, 1.0)
         self.scale_factor = scale
 
-        new_w, new_h = int(w * scale), int(h * scale)
-        resized = cv2.resize(frame, (new_w, new_h))
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        resized = cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
         if annotations:
             annotations(rgb, scale)
 
         try:
-            img = Image.fromarray(rgb)
-            self.display_frame = ImageTk.PhotoImage(img)
+            pil = Image.fromarray(rgb, mode="RGB")
+            self.display_frame = ImageTk.PhotoImage(pil, master=self)
             self.canvas.delete("all")
+            cx = canvas_w // 2
+            cy = canvas_h // 2
             self.canvas.create_image(
-                canvas_w // 2, canvas_h // 2,
-                image=self.display_frame, anchor="center",
+                cx,
+                cy,
+                image=self.display_frame,
+                anchor="center",
             )
             self._draw_overlay(scale, canvas_w, canvas_h, new_w, new_h)
         except tk.TclError:
@@ -358,9 +439,15 @@ class App(tk.Tk):
             logger.exception("Failed to render frame on canvas")
             raise
 
-        logger.debug(
-            "Frame displayed: video=%sx%s canvas=%sx%s scale=%.4f",
-            w, h, canvas_w, canvas_h, scale,
+        logger.info(
+            "Frame displayed: video=%sx%s canvas=%sx%s scaled=%sx%s scale=%.4f",
+            w,
+            h,
+            canvas_w,
+            canvas_h,
+            new_w,
+            new_h,
+            scale,
         )
 
     def _draw_overlay(self, scale, canvas_w, canvas_h, img_w, img_h):
